@@ -33,6 +33,7 @@
 #include "platform.h"
 #include "remapper.h"
 #include "tick.h"
+#include "switch_pro.h"
 
 // RP2350 UF2s wipe the last sector of flash every time
 // because of RP2350-E10 errata mitigation. So we put
@@ -70,6 +71,13 @@ void tud_sof_cb(uint32_t frame_count) {
 }
 
 bool do_send_report(uint8_t interface, const uint8_t* report_with_id, uint8_t len) {
+    // Retain the internal HORIPAD mapping, but expose USB Switch Pro externally.
+    if (our_descriptor->idx == 2 && interface == 0) {
+        if (len >= 9 && report_with_id[0] == 0) {
+            switch_pro_set_horipad(report_with_id + 1, (uint8_t)(len - 1));
+        }
+        return true;
+    }
     if (tud_suspended() &&
         (our_descriptor->should_cause_wakeup != nullptr) &&
         our_descriptor->should_cause_wakeup(report_with_id[0], report_with_id + 1, len - 1)) {
@@ -192,6 +200,7 @@ int main() {
     pio_usb_host_add_port(PICO_DEFAULT_PIO_USB_DP_PIN4, PIO_USB_PINOUT_DPDM);
 #endif
     stdio_init_all();
+    if (our_descriptor->idx == 2) switch_pro_init();
 
     next_print = time_us_64() + 1000000;
 
@@ -240,6 +249,7 @@ int main() {
         }
         if (tud_hid_n_ready(0) || tud_suspended()) {
             send_report(do_send_report);
+            if (our_descriptor->idx == 2) switch_pro_task();
         }
         if (monitor_enabled && tud_hid_n_ready(1)) {
             send_monitor_report(do_send_report);
