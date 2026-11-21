@@ -1,4 +1,7 @@
-#include <stdio.h>
+from pathlib import Path
+import difflib
+out=Path('/mnt/data')
+original='''#include <stdio.h>
 
 #include <tusb.h>
 
@@ -6,166 +9,37 @@
 
 #include "pico/platform.h"
 #include "pico/time.h"
+'''
+modified='''#include <stdio.h>
 
-#include "descriptor_parser.h"
-#include "interval_override.h"
-#include "out_report.h"
-#include "remapper.h"
-#include "tick.h"
+#include <tusb.h>
 
-static bool __no_inline_not_in_flash_func(manual_sof)(repeating_timer_t* rt) {
-    pio_usb_host_frame();
-    set_tick_pending();
-    return true;
+#include "pio_usb.h"
+
+#include "hardware/gpio.h"
+#include "hardware/uart.h"
+#include "pico/platform.h"
+#include "pico/time.h"
+
+// Debug output: GP16 (UART0 TX), 921600 baud, 3.3 V logic.
+// Never connect a 5 V serial adapter TX to the RP2040.
+#define STEAM_RAW_REPORT_DEBUG 1
+#if STEAM_RAW_REPORT_DEBUG
+static uint32_t last_dump_ms = 0;
+static void dump_hid_report(uint8_t dev_addr, uint8_t instance,
+                            const uint8_t* report, uint16_t len) {
+    // Limit serial traffic so normal USB processing can continue.
+    const uint32_t now = to_ms_since_boot(get_absolute_time());
+    if ((uint32_t)(now - last_dump_ms) < 100) return;
+    last_dump_ms = now;
+    printf("HID dev=%u itf=%u len=%u :", dev_addr, instance, len);
+    const uint16_t shown = len < 64 ? len : 64;
+    for (uint16_t i = 0; i < shown; ++i) printf(" %02X", report[i]);
+    if (len > shown) printf(" ...");
+    printf("\\\\r\\\\n");
 }
-
-static repeating_timer_t sof_timer;
-
-void extra_init() {
-    pio_usb_configuration_t pio_cfg = PIO_USB_DEFAULT_CONFIG;
-    pio_cfg.pin_dp = PICO_DEFAULT_PIO_USB_DP_PIN;
-    pio_cfg.skip_alarm_pool = true;
-    tuh_configure(BOARD_TUH_RHPORT, TUH_CFGID_RPI_PIO_USB_CONFIGURATION, &pio_cfg);
-    add_repeating_timer_us(-1000, manual_sof, NULL, &sof_timer);
-    pio_usb_host_set_interval_override(interval_override);
-}
-
-uint32_t get_gpio_valid_pins_mask() {
-    return GPIO_VALID_PINS_BASE & ~(
-#ifdef PICO_DEFAULT_UART_TX_PIN
-                                      (1 << PICO_DEFAULT_UART_TX_PIN) |
 #endif
-#ifdef PICO_DEFAULT_UART_RX_PIN
-                                      (1 << PICO_DEFAULT_UART_RX_PIN) |
-#endif
-#ifdef PICO_DEFAULT_PIO_USB_DP_PIN2
-                                      (1 << PICO_DEFAULT_PIO_USB_DP_PIN2) |
-                                      (1 << (PICO_DEFAULT_PIO_USB_DP_PIN2 + 1)) |
-#endif
-#ifdef PICO_DEFAULT_PIO_USB_DP_PIN3
-                                      (1 << PICO_DEFAULT_PIO_USB_DP_PIN3) |
-                                      (1 << (PICO_DEFAULT_PIO_USB_DP_PIN3 + 1)) |
-#endif
-#ifdef PICO_DEFAULT_PIO_USB_DP_PIN4
-                                      (1 << PICO_DEFAULT_PIO_USB_DP_PIN4) |
-                                      (1 << (PICO_DEFAULT_PIO_USB_DP_PIN4 + 1)) |
-#endif
-                                      (1 << PICO_DEFAULT_PIO_USB_DP_PIN) |
-                                      (1 << (PICO_DEFAULT_PIO_USB_DP_PIN + 1)));
-}
-
-static bool reports_received;
-
-void read_report(bool* new_report, bool* tick) {
-    *tick = get_and_clear_tick_pending();
-
-    reports_received = false;
-    tuh_task();
-    *new_report = reports_received;
-}
-
-void interval_override_updated() {
-    pio_usb_host_set_interval_override(interval_override);
-}
-
-void flash_b_side() {
-}
-
-uint8_t get_hub_port(uint8_t dev_addr) {
-    tuh_bus_info_t bus_info;
-    tuh_bus_info_get(dev_addr, &bus_info);
-#ifdef PICO_DEFAULT_PIO_USB_DP_PIN2
-    // Devices plugged directly into one of the PIO-USB ports (rhport 1, 2, ...)
-    // get hub_port 1, 2, ..., as if they were plugged into a hub.
-    if (bus_info.hub_addr == 0) {
-        return bus_info.rhport;
-    }
-#endif
-    return bus_info.hub_port;
-}
-
-void descriptor_received_callback(uint16_t vendor_id, uint16_t product_id, const uint8_t* report_descriptor, int len, uint16_t interface, uint8_t hub_port, uint8_t itf_num) {
-    parse_descriptor(vendor_id, product_id, report_descriptor, len, interface, itf_num);
-
-    device_connected_callback(interface, vendor_id, product_id, hub_port);
-}
-
-void tuh_hid_mount_cb(uint8_t dev_addr, uint8_t instance, uint8_t const* desc_report, uint16_t desc_len) {
-    printf("tuh_hid_mount_cb\n");
-
-    uint8_t hub_port = get_hub_port(dev_addr);
-
-    uint16_t vid;
-    uint16_t pid;
-    tuh_vid_pid_get(dev_addr, &vid, &pid);
-
-    tuh_itf_info_t itf_info;
-    tuh_hid_itf_get_info(dev_addr, instance, &itf_info);
-    uint8_t itf_num = itf_info.desc.bInterfaceNumber;
-
-    descriptor_received_callback(vid, pid, desc_report, desc_len, (uint16_t) (dev_addr << 8) | instance, hub_port, itf_num);
-
-    tuh_hid_receive_report(dev_addr, instance);
-}
-
-void umount_callback(uint8_t dev_addr, uint8_t instance) {
-    device_disconnected_callback(dev_addr);
-}
-
-void tuh_hid_umount_cb(uint8_t dev_addr, uint8_t instance) {
-    printf("tuh_hid_umount_cb\n");
-    umount_callback(dev_addr, instance);
-}
-
-void report_received_callback(uint8_t dev_addr, uint8_t instance, uint8_t const* report, uint16_t len) {
-    if (len > 0) {
-        handle_received_report(report, len, (uint16_t) (dev_addr << 8) | instance);
-
-        reports_received = true;
-    }
-}
-
-void tuh_hid_report_received_cb(uint8_t dev_addr, uint8_t instance, uint8_t const* report, uint16_t len) {
-    report_received_callback(dev_addr, instance, report, len);
-
-    tuh_hid_receive_report(dev_addr, instance);
-}
-
-void tuh_midi_rx_cb(uint8_t idx, uint32_t xferred_bytes) {
-    tuh_itf_info_t itf_info;
-    tuh_midi_itf_get_info(idx, &itf_info);
-    uint8_t hub_port = get_hub_port(itf_info.daddr);
-
-    uint8_t buf[4];
-    while (tuh_midi_packet_read(idx, buf)) {
-        handle_received_midi(hub_port, buf);
-    }
-    reports_received = true;
-}
-
-void queue_out_report(uint16_t interface, uint8_t report_id, const uint8_t* buffer, uint8_t len) {
-    do_queue_out_report(buffer, len, report_id, interface >> 8, interface & 0xFF, OutType::OUTPUT);
-}
-
-void queue_set_feature_report(uint16_t interface, uint8_t report_id, const uint8_t* buffer, uint8_t len) {
-    do_queue_out_report(buffer, len, report_id, interface >> 8, interface & 0xFF, OutType::SET_FEATURE);
-}
-
-void queue_get_feature_report(uint16_t interface, uint8_t report_id, uint8_t len) {
-    do_queue_get_report(report_id, interface >> 8, interface & 0xFF, len);
-}
-
-void send_out_report() {
-    do_send_out_report();
-}
-
-void __no_inline_not_in_flash_func(sof_callback)() {
-}
-
-void get_report_cb(uint8_t dev_addr, uint8_t interface, uint8_t report_id, uint8_t report_type, uint8_t* report, uint16_t len) {
-    handle_get_report_response((uint16_t) (dev_addr << 8) | interface, report_id, report, len);
-}
-
-void set_report_complete_cb(uint8_t dev_addr, uint8_t interface, uint8_t report_id) {
-    handle_set_report_complete((uint16_t) (dev_addr << 8) | interface, report_id);
-}
+'''
+# use direct construction for context patch from exact fetched content
+import subprocess
+print("Preparing a small diagnostic patch for the existing GP10/GP11 firmware.")
