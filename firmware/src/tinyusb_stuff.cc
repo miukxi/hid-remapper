@@ -33,6 +33,7 @@
 #include "our_descriptor.h"
 #include "platform.h"
 #include "remapper.h"
+#include "switch_pro.h"
 
 // These IDs are bogus. If you want to distribute any hardware using this,
 // you will have to get real ones.
@@ -95,6 +96,15 @@ const uint8_t configuration_descriptor5[] = {
     TUD_HID_DESCRIPTOR(1, 0, HID_ITF_PROTOCOL_NONE, config_report_descriptor_length, 0x83, CFG_TUD_HID_EP_BUFSIZE, 1),
 };
 
+const uint8_t configuration_descriptor_switch_pro[] = {
+    TUD_CONFIG_DESCRIPTOR(1, 1, 0,
+        TUD_CONFIG_DESC_LEN + TUD_HID_INOUT_DESC_LEN,
+        TUSB_DESC_CONFIG_ATT_REMOTE_WAKEUP, 250),
+    TUD_HID_INOUT_DESCRIPTOR(0, 0, HID_ITF_PROTOCOL_NONE,
+        SWITCH_PRO_REPORT_DESCRIPTOR_SIZE, 0x02, 0x81,
+        CFG_TUD_HID_EP_BUFSIZE, 8),
+};
+
 const uint8_t* configuration_descriptors[] = {
     configuration_descriptor0,
     configuration_descriptor1,
@@ -126,6 +136,13 @@ uint8_t const* tud_descriptor_device_cb() {
         desc_device.idVendor = our_descriptor->vid;
         desc_device.idProduct = our_descriptor->pid;
     }
+    if (our_descriptor->idx == 2) {
+        desc_device.idVendor = 0x057E;
+        desc_device.idProduct = 0x2009;
+        desc_device.bcdDevice = 0x0210;
+    } else {
+        desc_device.bcdDevice = 0x0100;
+    }
     return (uint8_t const*) &desc_device;
 }
 
@@ -133,6 +150,7 @@ uint8_t const* tud_descriptor_device_cb() {
 // Application return pointer to descriptor
 // Descriptor contents must exist long enough for transfer to complete
 uint8_t const* tud_descriptor_configuration_cb(uint8_t index) {
+    if (our_descriptor->idx == 2) return configuration_descriptor_switch_pro;
     return configuration_descriptors[our_descriptor->idx];
 }
 
@@ -140,6 +158,7 @@ uint8_t const* tud_descriptor_configuration_cb(uint8_t index) {
 // Application return pointer to descriptor
 // Descriptor contents must exist long enough for transfer to complete
 uint8_t const* tud_hid_descriptor_report_cb(uint8_t itf) {
+    if (our_descriptor->idx == 2 && itf == 0) return switch_pro_report_descriptor;
     if (itf == 0) {
         return our_descriptor->descriptor;
     } else if (itf == 1) {
@@ -170,6 +189,11 @@ uint16_t const* tud_descriptor_string_cb(uint8_t index, uint16_t langid) {
 
         const char* str = string_desc_arr[index];
 
+        if (our_descriptor->idx == 2) {
+            if (index == 1) str = "Nintendo Co., Ltd.";
+            if (index == 2) str = "Pro Controller";
+        }
+
         // Cap at max char
         chr_count = strlen(str);
         if (chr_count > 31)
@@ -180,7 +204,7 @@ uint16_t const* tud_descriptor_string_cb(uint8_t index, uint16_t langid) {
             _desc_str[1 + i] = str[i];
         }
 
-        if (index == 2) {
+        if (index == 2 && our_descriptor->idx != 2) {
             uint64_t unique_id = get_unique_id();
             for (uint8_t i = 0; i < 4; i++) {
                 _desc_str[1 + chr_count - 4 + i] = id_chars[(unique_id >> (15 - i * 5)) & 0x1F];
@@ -202,6 +226,8 @@ uint16_t const* tud_descriptor_string_cb(uint8_t index, uint16_t langid) {
 }
 
 uint16_t tud_hid_get_report_cb(uint8_t itf, uint8_t report_id, hid_report_type_t report_type, uint8_t* buffer, uint16_t reqlen) {
+    if (our_descriptor->idx == 2 && itf == 0)
+        return switch_pro_get_report(report_id, report_type, buffer, reqlen);
     if (itf == 0) {
         return handle_get_report0(report_id, buffer, reqlen);
     } else {
@@ -210,6 +236,10 @@ uint16_t tud_hid_get_report_cb(uint8_t itf, uint8_t report_id, hid_report_type_t
 }
 
 void tud_hid_set_report_cb(uint8_t itf, uint8_t report_id, hid_report_type_t report_type, uint8_t const* buffer, uint16_t bufsize) {
+    if (our_descriptor->idx == 2 && itf == 0) {
+        switch_pro_handle_output(report_id, report_type, buffer, bufsize);
+        return;
+    }
     if (itf == 0) {
         if ((report_id == 0) && (report_type == 0) && (bufsize > 0)) {
             report_id = buffer[0];
@@ -228,6 +258,7 @@ void tud_hid_set_protocol_cb(uint8_t instance, uint8_t protocol) {
 }
 
 void tud_mount_cb() {
+    if (our_descriptor->idx == 2) switch_pro_reset_session();
     // A USB bus reset clears TinyUSB's SOF callback enable, so it has to be set
     // again each time we get configured.
     tud_sof_cb_enable(true);
