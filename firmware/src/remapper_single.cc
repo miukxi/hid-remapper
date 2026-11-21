@@ -12,6 +12,7 @@
 #include "out_report.h"
 #include "remapper.h"
 #include "tick.h"
+#include "switch_pro.h"
 
 static bool __no_inline_not_in_flash_func(manual_sof)(repeating_timer_t* rt) {
     pio_usb_host_frame();
@@ -119,6 +120,7 @@ void tuh_hid_umount_cb(uint8_t dev_addr, uint8_t instance) {
 
 void report_received_callback(uint8_t dev_addr, uint8_t instance, uint8_t const* report, uint16_t len) {
     if (len > 0) {
+        switch_pro_capture_steam(dev_addr, report, len);
         handle_received_report(report, len, (uint16_t) (dev_addr << 8) | instance);
 
         reports_received = true;
